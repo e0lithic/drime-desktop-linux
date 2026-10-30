@@ -37,6 +37,7 @@ drop position, which the Drime web app handles like a browser drop.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import time
 from pathlib import Path
@@ -61,7 +62,7 @@ def downloads_dir() -> Path:
 
 def unique_path(directory: Path, name: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
-    p = directory / (name or "download")
+    p = directory / backend.safe_filename(name)
     stem, suffix, n = p.stem, p.suffix, 1
     while p.exists():
         n += 1
@@ -69,8 +70,13 @@ def unique_path(directory: Path, name: str) -> Path:
     return p
 
 
-def open_externally(uri: str, parent: Gtk.Window | None = None) -> None:
+def open_externally(uri: str, parent: Gtk.Window | None = None) -> bool:
+    """Open a web or mail link with the desktop's default handler; anything else
+    (file://, smb://, custom scheme handlers) is refused. Returns whether it was opened."""
+    if not backend.can_open_externally(uri):
+        return False
     Gtk.UriLauncher.new(uri).launch(parent, None, None)
+    return True
 
 
 # --- drag-and-drop upload ----------------------------------------------------
@@ -408,8 +414,8 @@ class DrimeWebView(Gtk.Overlay):
         self.on_notice = on_notice
         _register_drop_scheme()
 
-        backend.WEB_DATA_DIR.mkdir(parents=True, exist_ok=True)
-        backend.WEB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        for d in (backend.WEB_DATA_DIR.parent, backend.WEB_DATA_DIR, backend.WEB_CACHE_DIR):
+            backend.private_dir(d)   # the session cookies are as good as the password
         self.session = WebKit.NetworkSession.new(str(backend.WEB_DATA_DIR), str(backend.WEB_CACHE_DIR))
         cookies = self.session.get_cookie_manager()
         cookies.set_persistent_storage(str(backend.WEB_DATA_DIR / "cookies.sqlite"),
@@ -422,11 +428,13 @@ class DrimeWebView(Gtk.Overlay):
         self.view = WebKit.WebView(network_session=self.session, user_content_manager=self.ucm,
                                    hexpand=True, vexpand=True)
         settings = self.view.get_settings()
-        settings.set_enable_developer_extras(True)
+        # The Web Inspector only with DRIME_DESKTOP_DEBUG=1; no camera or microphone (unused).
+        settings.set_enable_developer_extras(bool(os.environ.get("DRIME_DESKTOP_DEBUG")))
         settings.set_enable_webgl(True)
-        settings.set_enable_media_stream(True)
+        settings.set_enable_media_stream(False)
         settings.set_user_agent_with_application_details("DrimeDesktop", __version__)
         self.view.connect("decide-policy", self._decide_policy)
+        self.view.connect("permission-request", self._permission_request)
         self.view.connect("create", self._create)
         self.view.connect("load-changed", self._load_changed)
         self.view.connect("load-failed", self._load_failed)
@@ -485,6 +493,12 @@ class DrimeWebView(Gtk.Overlay):
         self.progress.set_visible(event != WebKit.LoadEvent.FINISHED)
         if event == WebKit.LoadEvent.COMMITTED and not self._failed:
             self.offline.set_visible(False)
+        if event == WebKit.LoadEvent.COMMITTED:
+            uri = view.get_uri()
+            if uri and not backend.is_drime_url(uri) and urlparse(uri).scheme in ("http", "https"):
+                # The window has no address bar: say so when it shows someone else's page.
+                self.notice(f"This page is {urlparse(uri).hostname}, not Drime — "
+                            "don't enter your Drime password here.")
 
     def _load_failed(self, view, event, failing_uri, error):
         if error.matches(WebKit.NetworkError.quark(), WebKit.NetworkError.CANCELLED):
@@ -503,6 +517,20 @@ class DrimeWebView(Gtk.Overlay):
             open_externally(decision.get_navigation_action().get_request().get_uri(), self.get_root())
             decision.ignore()
             return True
+        if decision_type == WebKit.PolicyDecisionType.NAVIGATION_ACTION:
+            action = decision.get_navigation_action()
+            uri = action.get_request().get_uri()
+            scheme = urlparse(uri).scheme.lower()
+            if backend.is_drime_url(uri) or scheme in backend.INTERNAL_SCHEMES:
+                return False
+            if scheme in ("http", "https"):
+                # A link to another site goes to the browser, so that it is never shown in
+                # Drime's window. Redirects and form posts (e.g. a sign-in provider) stay.
+                if action.get_navigation_type() != WebKit.NavigationType.LINK_CLICKED:
+                    return False
+            open_externally(uri, self.get_root())   # http(s) and mailto only
+            decision.ignore()
+            return True
         if decision_type == WebKit.PolicyDecisionType.RESPONSE:
             if not decision.is_mime_type_supported():
                 decision.download()
@@ -512,6 +540,16 @@ class DrimeWebView(Gtk.Overlay):
     def _create(self, view, navigation_action):
         open_externally(navigation_action.get_request().get_uri(), self.get_root())
         return None
+
+    @staticmethod
+    def _permission_request(view, request) -> bool:
+        """Drime needs no camera, microphone or location: refuse instead of leaving it
+        to WebKit's default. Other requests (e.g. notifications) keep the default."""
+        if isinstance(request, (WebKit.UserMediaPermissionRequest, WebKit.GeolocationPermissionRequest,
+                                WebKit.DeviceInfoPermissionRequest)):
+            request.deny()
+            return True
+        return False
 
     # --- drag and drop -----------------------------------------------------
 
@@ -613,6 +651,11 @@ class DrimeWebView(Gtk.Overlay):
         download.connect("failed", self._download_failed)
 
     def _decide_destination(self, download, suggested_name):
+        if not backend.is_drime_url(self.view.get_uri()):
+            # Saved without asking only for Drime: a page from elsewhere gets no downloads.
+            download.cancel()
+            self.notice("A download from a page outside Drime was blocked.")
+            return True
         path = unique_path(downloads_dir(), suggested_name)
         download.set_destination(str(path))
         return True

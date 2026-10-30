@@ -228,3 +228,56 @@ def test_xdg_paths_follow_the_environment(monkeypatch, tmp_path):
         monkeypatch.delenv("XDG_CONFIG_HOME"); monkeypatch.delenv("XDG_DATA_HOME"); monkeypatch.delenv("XDG_CACHE_HOME")
         importlib.reload(backend)
     assert backend.CONFIG_DIR == backend.HOME / ".config/drime-desktop"
+
+
+@pytest.mark.parametrize("uri, expected", [
+    ("https://app.drime.cloud/drive", True),
+    ("https://drime.cloud/", True),
+    ("https://APP.Drime.Cloud/x", True),
+    ("http://app.drime.cloud/", False),            # not https
+    ("https://drime.cloud.evil.example/", False),
+    ("https://evildrime.cloud/", False),
+    ("https://app.drime.cloud@evil.example/", False),
+    ("file:///etc/passwd", False),
+    ("", False),
+    (None, False),
+])
+def test_is_drime_url(uri, expected):
+    assert backend.is_drime_url(uri) is expected
+
+
+@pytest.mark.parametrize("uri, expected", [
+    ("https://example.com/", True),
+    ("http://example.com/", True),
+    ("mailto:someone@example.com", True),
+    ("file:///home/me/Downloads/x.desktop", False),
+    ("smb://host/share", False),
+    ("steam://run/1", False),
+    ("javascript:alert(1)", False),
+    ("", False),
+])
+def test_can_open_externally(uri, expected):
+    assert backend.can_open_externally(uri) is expected
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("report.pdf", "report.pdf"),
+    ("../../.bashrc", ".bashrc"),
+    ("/etc/cron.d/job", "job"),
+    ("..\\..\\x.txt", "x.txt"),
+    ("..", "download"),
+    ("", "download"),
+    (None, "download"),
+])
+def test_safe_filename(name, expected):
+    assert backend.safe_filename(name) == expected
+
+
+def test_private_dir_tightens_existing(tmp_path):
+    d = tmp_path / "web"
+    d.mkdir(mode=0o755)
+    backend.private_dir(d)
+    assert d.stat().st_mode & 0o777 == 0o700
+    new = tmp_path / "a/b"
+    backend.private_dir(new)
+    assert new.stat().st_mode & 0o777 == 0o700

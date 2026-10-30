@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
+from urllib.parse import urlparse
 
 from . import APP_ID
 
@@ -69,6 +70,40 @@ LogCb = Callable[[str], None]
 
 def _noop(_line: str) -> None:
     pass
+
+
+# --- Web view trust rules (used by web.py; kept here so they are testable without GTK) ---
+
+WEB_DOMAIN = "drime.cloud"
+EXTERNAL_SCHEMES = ("http", "https", "mailto")   # what the system may be asked to open
+INTERNAL_SCHEMES = ("about", "blob", "data")      # page-internal documents, never external sites
+
+
+def is_drime_url(uri: str | None) -> bool:
+    """An https URL on drime.cloud or one of its subdomains."""
+    u = urlparse(uri or "")
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and (host == WEB_DOMAIN or host.endswith("." + WEB_DOMAIN))
+
+
+def can_open_externally(uri: str | None) -> bool:
+    """Only web and mail links go to the desktop's default handlers: a page must not be
+    able to launch file://, smb:// or whatever custom scheme handlers are installed."""
+    return urlparse(uri or "").scheme.lower() in EXTERNAL_SCHEMES
+
+
+def safe_filename(name: str | None, default: str = "download") -> str:
+    """A download name without any directory part (no absolute paths, no ../)."""
+    name = Path((name or "").replace("\\", "/")).name.strip()
+    return name if name and name not in (".", "..") else default
+
+
+def private_dir(path: Path) -> Path:
+    """Create `path` (and fix an existing one) readable by the user only: it holds the
+    web login (session cookies), which other local accounts must not be able to read."""
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
 
 
 def child_pids(comm: str, proc: Path = Path("/proc"), parent: int | None = None) -> list[int]:

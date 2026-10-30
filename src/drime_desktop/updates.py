@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
+from urllib.parse import urlparse
 
 from . import GITHUB_REPO, __version__, backend
 
@@ -21,6 +23,8 @@ RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 PREFS = backend.CONFIG_DIR / "updates.json"
 # Release asset to download per package family (see package_family()).
 PACKAGE_SUFFIX = {"fedora": ".noarch.rpm", "debian": "_all.deb", "flatpak": ".flatpak"}
+# Release assets are always served from here (then redirected to GitHub's storage).
+DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
 
 
 def package_family() -> str:
@@ -95,7 +99,14 @@ def downloads_dir() -> Path:
     return Path(out) if out else Path.home() / "Downloads"
 
 
+def is_release_asset(url: str) -> bool:
+    """A file attached to one of this project's GitHub releases, over https."""
+    return url.startswith(DOWNLOAD_PREFIX) and urlparse(url).hostname == "github.com"
+
+
 def download_package(url: str, progress: Callable[[int, int], None] | None = None) -> Path:
+    if not is_release_asset(url):
+        raise UpdateError(f"Refusing to download an update from outside {RELEASES_URL}: {url}")
     dest_dir = downloads_dir()
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / url.rsplit("/", 1)[-1]
@@ -177,7 +188,7 @@ def restart_app() -> None:
     exe = shutil.which("drime-desktop")
     cmd = [exe] if exe else [sys.executable, "-c", "import sys; from drime_desktop.cli import main; sys.exit(main())"]
     waiter = (f"while kill -0 {os.getpid()} 2>/dev/null; do sleep 0.2; done; "
-              + "exec " + " ".join(subprocess.list2cmdline([c]) for c in cmd))
+              + "exec " + shlex.join(cmd))
     subprocess.Popen(["sh", "-c", waiter], start_new_session=True,
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 

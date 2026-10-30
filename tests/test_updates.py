@@ -85,3 +85,19 @@ def test_package_suffixes_match_the_release_filenames():
     assert ASSETS[2]["name"].endswith(updates.PACKAGE_SUFFIX["debian"])
     assert ASSETS[4]["name"].endswith(updates.PACKAGE_SUFFIX["flatpak"])
     assert not ASSETS[1]["name"].endswith(updates.PACKAGE_SUFFIX["fedora"])  # not the src.rpm
+
+
+@pytest.mark.parametrize("url, expected", [
+    (updates.DOWNLOAD_PREFIX + "v0.5.0/drime-desktop-0.5.0-1.fc44.noarch.rpm", True),
+    ("http://github.com/" + updates.GITHUB_REPO + "/releases/download/v1/x.rpm", False),
+    ("https://github.com/someone-else/drime-desktop-linux/releases/download/v1/x.rpm", False),
+    ("https://evil.example/" + updates.GITHUB_REPO + "/releases/download/v1/x.rpm", False),
+])
+def test_is_release_asset(url, expected):
+    assert updates.is_release_asset(url) is expected
+
+
+def test_download_refuses_foreign_url(monkeypatch):
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: pytest.fail("must not download"))
+    with pytest.raises(updates.UpdateError):
+        updates.download_package("https://evil.example/drime-desktop.rpm")
